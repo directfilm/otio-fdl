@@ -79,21 +79,54 @@ def validate_fdl(document):
     try:
         jsonschema.validate(document, _schema(schema_file))
     except jsonschema.ValidationError as exc:
+        path = "/".join(str(p) for p in exc.absolute_path) or "<root>"
+        hint = ""
+        if "minimum" in exc.message and "anchor" in path:
+            # FDL 2.0 and 2.0.1 share version {2,0} (ascmitc/fdl#42) but
+            # 2.0.1 forbids the negative anchors 2.0 allowed (#45) — give
+            # the real diagnosis instead of a generic schema error
+            hint = (
+                " — note: this document may be valid FDL 2.0; negative"
+                " anchors were disallowed in 2.0.1 (ascmitc/fdl#42, #45)"
+            )
         raise FDLError(
             f"FDL document failed schema validation: {exc.message}"
-            f" (at {'/'.join(str(p) for p in exc.absolute_path) or '<root>'})"
+            f" (at {path}){hint}"
         ) from exc
+
+
+def _check_canvas_ids(document):
+    """Reject documents whose canvas ids are not unique document-wide.
+
+    The spec leaves cross-context id uniqueness ambiguous (ascmitc/fdl#32),
+    but id-based linking and source_canvas_id chains require it — a
+    duplicate would make references silently resolve to the wrong canvas.
+    Deliberately stricter than the schema.
+    """
+    seen = set()
+    for _, canvas in iter_canvases(document):
+        cid = canvas.get("id")
+        if cid in seen:
+            raise FDLError(
+                f"duplicate canvas id {cid!r}: canvas ids must be unique"
+                " across the whole document for id-based linking"
+                " (spec ambiguity: ascmitc/fdl#32)"
+            )
+        seen.add(cid)
 
 
 def attach_document(timeline, document, *, validate=True, replace=False):
     """Attach an FDL document to ``timeline.metadata["ascfdl"]["document"]``.
 
     The document is deep-copied in (via plain-JSON conversion), so later
-    mutation of the source cannot corrupt the timeline. Set ``replace=True``
-    to overwrite an existing document.
+    mutation of the source cannot corrupt the timeline. Canvas ids must be
+    unique document-wide (see :func:`_check_canvas_ids`) even when
+    ``validate=False``. Set ``replace=True`` to overwrite an existing
+    document.
     """
     if validate:
         validate_fdl(document)
+    _check_canvas_ids(document)
     ns = timeline.metadata.setdefault(NAMESPACE, {})
     if "document" in ns and not replace:
         raise FDLError(
@@ -222,11 +255,11 @@ def _reference_matches_file(media_reference, filename):
     ``filename`` fits the sequence pattern (prefix/suffix) or equals the
     decoded basename of the sequence directory.
     """
-    prefix = getattr(media_reference, "name_prefix", None)
-    suffix = getattr(media_reference, "name_suffix", None)
-    if prefix is not None or suffix is not None:  # image sequence
-        if filename.startswith(prefix or "") and filename.endswith(suffix or ""):
-            if len(filename) > len(prefix or "") + len(suffix or ""):
+    prefix = getattr(media_reference, "name_prefix", None) or ""
+    suffix = getattr(media_reference, "name_suffix", None) or ""
+    if prefix or suffix:  # image sequence with a real naming pattern
+        if filename.startswith(prefix) and filename.endswith(suffix):
+            if len(filename) > len(prefix) + len(suffix):
                 return True
     for url in (
         getattr(media_reference, "target_url", None),
@@ -272,10 +305,10 @@ def auto_link(timeline, choose=None):
         if clip_id.get("file"):
             with_file.append((clip_id["file"], context))
 
-    report = {"linked": {}, "ambiguous": {}, "unmatched": []}
+    report = {"linked": [], "ambiguous": [], "unmatched": []}
     for clip in timeline.find_clips():
         name_contexts = by_clip_name.get(clip.name, [])
-        matched_any = False
+        produced_row = False
         for key, mr in _media_references(clip).items():
             file_contexts = [
                 ctx for fname, ctx in with_file
@@ -284,20 +317,33 @@ def auto_link(timeline, choose=None):
             contexts = file_contexts or name_contexts
             if not contexts:
                 continue
-            matched_any = True
             candidates = [c for ctx in contexts for c in ctx.get("canvases", [])]
             if len(candidates) > 1 and choose is not None:
                 picked = choose(mr, candidates)
                 if picked is not None:
+                    picked_id = picked.get("id") if hasattr(picked, "get") else None
+                    if picked_id not in {c["id"] for c in candidates}:
+                        raise FDLError(
+                            "choose() returned a canvas that is not among"
+                            f" the candidates ({picked_id!r})"
+                        )
                     candidates = [picked]
             if len(candidates) == 1:
                 link(mr, candidates[0]["id"])
-                report["linked"].setdefault(clip.name, {})[key] = candidates[0]["id"]
+                report["linked"].append(
+                    {"clip": clip.name, "ref": key, "canvas_id": candidates[0]["id"]}
+                )
+                produced_row = True
             elif candidates:
-                report["ambiguous"].setdefault(clip.name, {})[key] = [
-                    c["id"] for c in candidates
-                ]
-        if not matched_any:
+                report["ambiguous"].append(
+                    {
+                        "clip": clip.name,
+                        "ref": key,
+                        "candidates": [c["id"] for c in candidates],
+                    }
+                )
+                produced_row = True
+        if not produced_row:
             report["unmatched"].append(clip.name)
     return report
 

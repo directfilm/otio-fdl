@@ -51,10 +51,11 @@ def transform_between(
     dst_w_d = dst_fd["dimensions"]["width"] * dst_sq
     src_h = src_fd["dimensions"]["height"]
     dst_h = dst_fd["dimensions"]["height"]
-    if not (src_w_d and src_h):
-        raise FDLError(
-            f"framing decision {src_fd.get('id')!r} has degenerate dimensions"
-        )
+    for fd, w, h in ((src_fd, src_w_d, src_h), (dst_fd, dst_w_d, dst_h)):
+        if not (w and h):
+            raise FDLError(
+                f"framing decision {fd.get('id')!r} has degenerate dimensions"
+            )
 
     ratio_w = dst_w_d / src_w_d
     scale_x = (src_sq / dst_sq) * ratio_w

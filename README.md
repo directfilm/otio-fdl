@@ -37,7 +37,7 @@ otio_fdl.attach_document(timeline, document)
 
 # Link media references to canvases — automatically via FDL 2.0 clip_id
 # records, or explicitly:
-report = otio_fdl.auto_link(timeline)          # {"linked": [...], ...}
+report = otio_fdl.auto_link(timeline)  # {"linked": [rows], "ambiguous": [rows], "unmatched": [...]}
 clip = next(iter(timeline.find_clips()))
 otio_fdl.link(clip.media_reference, "pXLM4OnA", timeline=timeline)
 
@@ -65,6 +65,26 @@ restored = otio_fdl.extract_document(timeline)
 
 otio.adapters.write_to_file(timeline, "cut_with_framing.otio")
 ```
+
+## Limitations (deliberate, documented)
+
+- **No rotation or flip/flop.** FDL has no orientation field — every region
+  is an axis-aligned rect ([ascmitc/fdl#28](https://github.com/ascmitc/fdl/issues/28),
+  slated for FDL 2.1). Transforms here are translation + per-axis scale;
+  a flopped dailies render or rotated crash-cam plate cannot be described
+  until the spec can say it.
+- **No per-frame framing.** Keyframed reframes and mid-shot moves are out
+  of the FDL spec's scope (section 2) — that is effect territory, not
+  framing metadata.
+- **One FDL document per timeline.** Regime changes (new charts mid-show)
+  are expressed inside one document; merging per-episode/per-block FDLs
+  into a season conform has no upstream semantics yet and is future work.
+- **Canvas ids must be unique document-wide** — the spec is ambiguous
+  across contexts ([#32](https://github.com/ascmitc/fdl/issues/32)); this
+  library is deliberately stricter because id-based linking depends on it.
+- **Template alignment is the spec's 9-grid.** Arbitrary off-center pull
+  alignment awaits [#30](https://github.com/ascmitc/fdl/issues/30);
+  off-center *decisions* are fully supported.
 
 ## Fidelity
 

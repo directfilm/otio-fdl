@@ -198,9 +198,13 @@ def test_auto_link_multi_canvas_context_with_chooser(cut):
     knowledge — an editorial cut references the 1080p proxies."""
     report = otio_fdl.auto_link(cut)
     key = otio.schema.Clip.DEFAULT_MEDIA_KEY
-    assert report["ambiguous"] == {
-        "shot010": {key: ["ocfA448", "dsq4k", "offline1080"]}
-    }
+    assert report["ambiguous"] == [
+        {
+            "clip": "shot010",
+            "ref": key,
+            "candidates": ["ocfA448", "dsq4k", "offline1080"],
+        }
+    ]
 
     def editorial_proxy(mr, canvases):
         hits = [
@@ -210,7 +214,9 @@ def test_auto_link_multi_canvas_context_with_chooser(cut):
         return hits[0] if len(hits) == 1 else None
 
     report = otio_fdl.auto_link(cut, choose=editorial_proxy)
-    assert report["linked"] == {"shot010": {key: "offline1080"}}
+    assert report["linked"] == [
+        {"clip": "shot010", "ref": key, "canvas_id": "offline1080"}
+    ]
 
 
 def test_reframe_note_maps_offline_to_ocf_and_back(cut):
@@ -351,3 +357,34 @@ def test_declining_source_callable_is_per_clip_error(cut):
     )
     assert spec["status"] == "error"
     assert "declined" in spec["error"]
+
+
+def test_pull_uses_default_intent_not_first_decision(cut):
+    """spec 7.1.4: default_framing_intent picks the decision, not list
+    order — reorder so the default is NOT first and verify the pull."""
+    _link_offline(cut)
+    document = otio_fdl.get_document(cut)
+    for _, canvas in otio_fdl.iter_canvases(document):
+        canvas["framing_decisions"] = list(
+            reversed(list(canvas["framing_decisions"]))
+        )  # tv169 now first; default is sc239
+    (spec,) = otio_fdl.pull_specs(cut, template_id="vxp01")
+    fd = spec["pull"]["framing_decisions"][0]
+    assert fd["framing_intent_id"] == "sc239"
+
+
+def test_unlinked_active_reference_surfaces_linked_others(cut):
+    """A clip whose ACTIVE reference is unlinked but whose other
+    reference is linked must say so in the pull list."""
+    clip = next(iter(cut.find_clips()))
+    key = otio.schema.Clip.DEFAULT_MEDIA_KEY
+    refs = clip.media_references()
+    refs["ocf"] = otio.schema.ExternalReference(
+        target_url="file:///ocf/shot010.arriraw"
+    )
+    clip.set_media_references(refs, key)
+    otio_fdl.link(clip.media_references()["ocf"], "ocfA448", timeline=cut)
+
+    (spec,) = otio_fdl.pull_specs(cut, template_id="vxp01")
+    assert spec["status"] == "unlinked"
+    assert spec["linked_references"] == {"ocf": "ocfA448"}

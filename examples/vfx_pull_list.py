@@ -57,6 +57,9 @@ def main():
         if spec.get("status") == "unlinked":
             print(f"  {spec['clip']:<28} !! no canvas linked")
             continue
+        if spec.get("status") == "error":
+            print(f"  {spec['clip']:<28} !! {spec['error']}")
+            continue
         pull = spec["pull"]
         src = spec["canvas_id"]
         dims = pull["dimensions"]

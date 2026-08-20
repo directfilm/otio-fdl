@@ -26,6 +26,7 @@ import re
 
 from .core import (
     FDLError,
+    _media_references,
     canvas_chain,
     canvas_for,
     get_document,
@@ -203,13 +204,17 @@ def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=No
 
     # -- Compose the output canvas.
     def place(dims, anchor):
-        """Map a source-canvas region into output coordinates."""
+        """Map a source-canvas region into output coordinates, clipped to
+        the canvas: overflow (fill fits, maximum crops) is cut off per
+        7.4.7, and the schema forbids negative anchors."""
+        x0 = Fx + sx(anchor["x"] - fit_anchor["x"])
+        y0 = Fy + sy(anchor["y"] - fit_anchor["y"])
+        x1 = min(x0 + sx(dims["width"]), Cw)
+        y1 = min(y0 + sy(dims["height"]), Ch)
+        x0, y0 = min(max(x0, 0.0), Cw), min(max(y0, 0.0), Ch)
         return (
-            {"width": sx(dims["width"]), "height": sy(dims["height"])},
-            {
-                "x": Fx + sx(anchor["x"] - fit_anchor["x"]),
-                "y": Fy + sy(anchor["y"] - fit_anchor["y"]),
-            },
+            {"width": max(x1 - x0, 0.0), "height": max(y1 - y0, 0.0)},
+            {"x": x0, "y": y0},
         )
 
     if canvas_id is not None:
@@ -252,15 +257,15 @@ def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=No
         )
     else:
         e_dims, e_anchor = place(canvas["dimensions"], {"x": 0, "y": 0})
-    ex0, ey0 = max(e_anchor["x"], 0.0), max(e_anchor["y"], 0.0)
-    ex1 = min(e_anchor["x"] + e_dims["width"], Cw)
-    ey1 = min(e_anchor["y"] + e_dims["height"], Ch)
-    if round(ex1 - ex0) != round(Cw) or round(ey1 - ey0) != round(Ch):
+    if (
+        round(e_dims["width"]) != round(Cw)
+        or round(e_dims["height"]) != round(Ch)
+    ):
         out["effective_dimensions"] = {
-            "width": int(round(ex1 - ex0)),
-            "height": int(round(ey1 - ey0)),
+            "width": int(round(e_dims["width"])),
+            "height": int(round(e_dims["height"])),
         }
-        out["effective_anchor_point"] = {"x": ex0, "y": ey0}
+        out["effective_anchor_point"] = e_anchor
     return out
 
 
@@ -320,7 +325,18 @@ def pull_specs(timeline, template_id=None, framing_intent_id=None, source="root"
         try:
             canvas = canvas_for(clip.media_reference, timeline)
             if canvas is None:
-                specs.append({"clip": clip.name, "status": "unlinked"})
+                entry = {"clip": clip.name, "status": "unlinked"}
+                others = {
+                    key: mr.metadata["ascfdl"]["canvas_id"]
+                    for key, mr in _media_references(clip).items()
+                    if mr is not clip.media_reference
+                    and mr.metadata.get("ascfdl", {}).get("canvas_id")
+                }
+                if others:
+                    # the cut's active representation is unresolved but
+                    # other references ARE linked — make that visible
+                    entry["linked_references"] = others
+                specs.append(entry)
                 continue
             if callable(source):
                 chain = canvas_chain(document, canvas["id"])
@@ -334,7 +350,11 @@ def pull_specs(timeline, template_id=None, framing_intent_id=None, source="root"
             else:  # "linked"
                 pull_from = canvas
             pull = apply_canvas_template(
-                pull_from, template, framing_intent_id=framing_intent_id
+                pull_from,
+                template,
+                framing_intent_id=(
+                    framing_intent_id or document.get("default_framing_intent")
+                ),
             )
         except FDLError as exc:
             specs.append({"clip": clip.name, "status": "error", "error": str(exc)})

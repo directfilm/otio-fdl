@@ -169,7 +169,9 @@ def test_auto_link_image_sequence(simple_timeline, a65_document):
 
     report = otio_fdl.auto_link(simple_timeline)
 
-    assert report["linked"] == {"shot010": {KEY: "pXLM4OnA"}}
+    assert report["linked"] == [
+        {"clip": "shot010", "ref": KEY, "canvas_id": "pXLM4OnA"}
+    ]
 
 
 def test_auto_link_percent_encoded_url(simple_timeline, a65_document):
@@ -186,7 +188,9 @@ def test_auto_link_percent_encoded_url(simple_timeline, a65_document):
 
     report = otio_fdl.auto_link(simple_timeline)
 
-    assert report["linked"] == {"shot010": {KEY: "pXLM4OnA"}}
+    assert report["linked"] == [
+        {"clip": "shot010", "ref": KEY, "canvas_id": "pXLM4OnA"}
+    ]
 
 
 # --- multi-reference clips: report is per-reference ---------------------------
@@ -208,7 +212,9 @@ def test_auto_link_multi_reference_reports_which_ref(simple_timeline, a65_docume
 
     report = otio_fdl.auto_link(simple_timeline)
 
-    assert report["linked"] == {"shot010": {"highres": "pXLM4OnA"}}
+    assert report["linked"] == [
+        {"clip": "shot010", "ref": "highres", "canvas_id": "pXLM4OnA"}
+    ]
     # the report is per-reference, so it is visible that the ACTIVE
     # reference is not the one that linked
     assert otio_fdl.canvas_for(clip.media_reference, simple_timeline) is None
@@ -269,11 +275,13 @@ def test_fill_overflow_is_cut_not_grown():
         "fit_method": "fill",
     }
     out = otio_fdl.apply_canvas_template(canvas, template)
-    # fill: canvas stays at target; the 4:3 source overflows vertically
+    # fill: canvas stays at target; the 4:3 source's overflow is CUT OFF
+    # (spec 7.4.7) — the emitted decision is clipped to the canvas, never
+    # negative (the schema forbids negative anchors)
     assert out["dimensions"] == {"width": 3840, "height": 2160}
     fd = out["framing_decisions"][0]
-    assert fd["dimensions"]["height"] == pytest.approx(2880)  # cut off
-    assert fd["anchor_point"]["y"] == pytest.approx(-360)
+    assert fd["dimensions"]["height"] == pytest.approx(2160)
+    assert fd["anchor_point"]["y"] == pytest.approx(0)
 
 
 # --- MissingReference carries links too --------------------------------------
@@ -285,3 +293,110 @@ def test_missing_reference_links(simple_timeline, a65_document):
     otio_fdl.link(clip.media_reference, "pXLM4OnA", timeline=simple_timeline)
     canvas = otio_fdl.canvas_for(clip.media_reference, simple_timeline)
     assert canvas["id"] == "pXLM4OnA"
+
+
+# --- industry-research protections -------------------------------------------
+
+def test_duplicate_canvas_ids_rejected(simple_timeline, a65_document):
+    """ascmitc/fdl#32: cross-context id uniqueness is ambiguous in the
+    spec, but our id-based linking requires it."""
+    document = copy.deepcopy(a65_document)
+    document["contexts"].append(
+        {
+            "label": "B cam",
+            "canvases": [copy.deepcopy(document["contexts"][0]["canvases"][0])],
+        }
+    )
+    with pytest.raises(otio_fdl.FDLError, match="duplicate canvas id"):
+        otio_fdl.attach_document(simple_timeline, document, validate=False)
+
+
+def test_negative_anchor_gets_version_hint(a65_document):
+    """ascmitc/fdl#42/#45: a 2.0-legal negative anchor fails the 2.0.1
+    schema — the error must diagnose the version split, not just say
+    'invalid'."""
+    document = copy.deepcopy(a65_document)
+    fd = document["contexts"][0]["canvases"][0]["framing_decisions"][0]
+    fd["anchor_point"]["x"] = -120.0
+    with pytest.raises(otio_fdl.FDLError, match="ascmitc/fdl#42"):
+        otio_fdl.validate_fdl(document)
+
+
+def test_fill_minted_canvas_is_schema_valid(simple_timeline, a65_document):
+    """The clipped fill output must revalidate inside a document."""
+    document = copy.deepcopy(a65_document)
+    template = {
+        "label": "Fill", "id": "FILL01",
+        "target_dimensions": {"width": 3840, "height": 2160},
+        "target_anamorphic_squeeze": 1.0,
+        "fit_source": "framing_decision.dimensions",
+        "fit_method": "fill",
+    }
+    canvas = document["contexts"][0]["canvases"][0]
+    minted = otio_fdl.apply_canvas_template(canvas, template)
+    document["contexts"][0]["canvases"].append(minted)
+    document.setdefault("canvas_templates", []).append(template)
+    otio_fdl.validate_fdl(document)  # must not raise
+
+
+def test_duplicate_clip_names_stay_distinct(simple_timeline, a65_document):
+    document = copy.deepcopy(a65_document)
+    document["contexts"][0]["clip_id"] = {"clip_name": "shot010"}
+    otio_fdl.attach_document(simple_timeline, document)
+    # rename the second clip to collide with the first
+    clips = list(simple_timeline.find_clips())
+    clips[1].name = "shot010"
+
+    report = otio_fdl.auto_link(simple_timeline)
+
+    assert len(report["linked"]) == 2  # one row per clip, no collapse
+    assert all(r["canvas_id"] == "pXLM4OnA" for r in report["linked"])
+
+
+def test_matching_context_with_no_canvases_is_unmatched(
+    simple_timeline, a65_document
+):
+    document = copy.deepcopy(a65_document)
+    document["contexts"][0]["clip_id"] = {"clip_name": "shot010"}
+    document["contexts"][0]["canvases"] = []
+    otio_fdl.attach_document(simple_timeline, document, validate=False)
+
+    report = otio_fdl.auto_link(simple_timeline)
+
+    # the clip must not vanish: no canvases means it stays unmatched
+    assert "shot010" in report["unmatched"]
+
+
+def test_chooser_return_must_be_a_candidate(simple_timeline, a65_document):
+    document = copy.deepcopy(a65_document)
+    document["contexts"][0]["clip_id"] = {"clip_name": "shot010"}
+    second = copy.deepcopy(document["contexts"][0]["canvases"][0])
+    second["id"] = "second01"
+    document["contexts"][0]["canvases"].append(second)
+    otio_fdl.attach_document(simple_timeline, document, validate=False)
+
+    with pytest.raises(otio_fdl.FDLError, match="not among"):
+        otio_fdl.auto_link(
+            simple_timeline, choose=lambda mr, c: {"id": "not_in_document"}
+        )
+
+
+def test_empty_sequence_pattern_matches_nothing(simple_timeline, a65_document):
+    """Regression: default empty prefix/suffix must not match every file."""
+    document = copy.deepcopy(a65_document)
+    document["contexts"][0]["clip_id"] = {
+        "clip_name": "A004C012_230114_R1CB",
+        "file": "totally_unrelated.mov",
+    }
+    otio_fdl.attach_document(simple_timeline, document)
+    clip = [c for c in simple_timeline.find_clips() if c.name == "shot010"][0]
+    clip.media_reference = otio.schema.ImageSequenceReference(
+        target_url_base="file:///plates/B_roll/",
+        start_frame=1001,
+        rate=24,
+    )
+
+    report = otio_fdl.auto_link(simple_timeline)
+
+    assert report["linked"] == []
+    assert "shot010" in report["unmatched"]

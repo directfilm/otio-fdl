@@ -6,28 +6,21 @@ on:
       - '*'
 
 jobs:
-  build:
-    env:
-      plugin_name: "otio-fdl"
-
+  release:
     name: Create Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: otio-template-plugin{{ github.ref }}
-          body: |
-            Changes in this release
-            * something
-            * something
+        uses: actions/checkout@v4
 
-            Please upgrade your adapter with `pip install --upgrade ${{ env.plugin_name }}`
-          draft: true
-          prerelease: false
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "otio-fdl ${{ github.ref_name }}" \
+            --draft \
+            --generate-notes
