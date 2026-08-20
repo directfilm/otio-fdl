@@ -79,9 +79,32 @@ def build_document():
                         ],
                     },
                     {
+                        "label": "Desqueezed Master",
+                        "id": "dsq4k",
+                        "source_canvas_id": "ocfA448",
+                        "dimensions": {"width": 4448, "height": 1548},
+                        "anamorphic_squeeze": 1.0,
+                        "framing_decisions": [
+                            {
+                                "label": "2.39 Scope",
+                                "id": "dsq4k-sc239",
+                                "framing_intent_id": "sc239",
+                                "dimensions": {"width": 3700, "height": 1548},
+                                "anchor_point": {"x": 374, "y": 0},
+                            },
+                            {
+                                "label": "16-9 TV",
+                                "id": "dsq4k-tv169",
+                                "framing_intent_id": "tv169",
+                                "dimensions": {"width": 2752, "height": 1548},
+                                "anchor_point": {"x": 848, "y": 0},
+                            },
+                        ],
+                    },
+                    {
                         "label": "Editorial DNx 1080",
                         "id": "offline1080",
-                        "source_canvas_id": "ocfA448",
+                        "source_canvas_id": "dsq4k",
                         "dimensions": {"width": 1920, "height": 1080},
                         "effective_dimensions": {"width": 1920, "height": 804},
                         "effective_anchor_point": {"x": 0.0, "y": 138.0},
@@ -113,6 +136,16 @@ def build_document():
             }
         ],
         "canvas_templates": [
+            {
+                "label": "VFX Pull 2K",
+                "id": "vxp2k",
+                "target_dimensions": {"width": 2048, "height": 1080},
+                "target_anamorphic_squeeze": 1.0,
+                "fit_source": "framing_decision.dimensions",
+                "fit_method": "width",
+                "preserve_from_source_canvas": "canvas.dimensions",
+                "round": {"even": "even", "mode": "up"},
+            },
             {
                 "label": "VFX Pull",
                 "id": "vxp01",
@@ -160,21 +193,23 @@ def _link_offline(timeline):
 
 
 def test_auto_link_multi_canvas_context_with_chooser(cut):
-    """OCF + proxy canvases in one context: ambiguous by default (never
-    guess), resolved by a chooser that knows proxies are derived."""
+    """OCF + intermediate + proxy canvases in one context: ambiguous by
+    default (never guess), resolved by a chooser encoding pipeline
+    knowledge — an editorial cut references the 1080p proxies."""
     report = otio_fdl.auto_link(cut)
     key = otio.schema.Clip.DEFAULT_MEDIA_KEY
     assert report["ambiguous"] == {
-        "shot010": {key: ["ocfA448", "offline1080"]}
+        "shot010": {key: ["ocfA448", "dsq4k", "offline1080"]}
     }
 
-    def prefer_derived(mr, canvases):
-        derived = [
-            c for c in canvases if c.get("source_canvas_id") != c.get("id")
+    def editorial_proxy(mr, canvases):
+        hits = [
+            c for c in canvases
+            if c["dimensions"] == {"width": 1920, "height": 1080}
         ]
-        return derived[0] if len(derived) == 1 else None
+        return hits[0] if len(hits) == 1 else None
 
-    report = otio_fdl.auto_link(cut, choose=prefer_derived)
+    report = otio_fdl.auto_link(cut, choose=editorial_proxy)
     assert report["linked"] == {"shot010": {key: "offline1080"}}
 
 
@@ -208,7 +243,7 @@ def test_reframe_note_maps_offline_to_ocf_and_back(cut):
 def test_pull_comes_from_ocf_not_proxy(cut):
     """pull_specs walks the derivation chain to the camera original (D1)."""
     _link_offline(cut)
-    specs = otio_fdl.pull_specs(cut)
+    specs = otio_fdl.pull_specs(cut, template_id="vxp01")
     (spec,) = specs
     assert spec["canvas_id"] == "offline1080"      # what the cut references
     assert spec["pulled_from"] == "ocfA448"        # what the pull uses
@@ -223,7 +258,7 @@ def test_pull_comes_from_ocf_not_proxy(cut):
     assert fd["anchor_point"]["x"] == pytest.approx(415.0, abs=0.01)
 
     # without the chain walk the pull would wrongly come from the proxy
-    proxy_specs = otio_fdl.pull_specs(cut, from_root=False)
+    proxy_specs = otio_fdl.pull_specs(cut, template_id="vxp01", source="linked")
     assert proxy_specs[0]["pulled_from"] == "offline1080"
 
 
@@ -258,7 +293,7 @@ def test_conform_qc_roundtrip(cut):
     exactly — the chain OCF -> offline -> pull -> OCF closes."""
     _link_offline(cut)
     document = otio_fdl.extract_document(cut)
-    pull = otio_fdl.pull_specs(cut)[0]["pull"]
+    pull = otio_fdl.pull_specs(cut, template_id="vxp01")[0]["pull"]
     document["contexts"][0]["canvases"].append(pull)
     otio_fdl.validate_fdl(document)  # minted canvas is valid FDL in place
 
@@ -269,3 +304,50 @@ def test_conform_qc_roundtrip(cut):
     assert dims["height"] == pytest.approx(OCF_H)
     assert anchor["x"] == pytest.approx(FD_X)
     assert anchor["y"] == pytest.approx(0, abs=1e-6)
+
+
+def test_pull_from_desqueezed_intermediate_via_callable(cut):
+    """Pulls are NOT always from the open gate: a callable source picks
+    the pre-desqueezed master out of the derivation chain, and the 2K
+    template scales down from there — both are pipeline policy."""
+    _link_offline(cut)
+
+    def first_desqueezed(clip, chain):
+        return next(
+            c for c in chain[1:] if c.get("anamorphic_squeeze") == 1.0
+        )
+
+    (spec,) = otio_fdl.pull_specs(
+        cut, template_id="vxp2k", source=first_desqueezed
+    )
+    assert spec["canvas_id"] == "offline1080"
+    assert spec["pulled_from"] == "dsq4k"
+    pull = spec["pull"]
+    # 2048/3700 fit on the 4448x1548 master, gate preserved: 2464x1080
+    assert pull["dimensions"] == {"width": 2464, "height": 1080}
+    assert pull["anamorphic_squeeze"] == 1.0
+    fd = pull["framing_decisions"][0]
+    assert fd["dimensions"]["width"] == pytest.approx(2048)
+    assert fd["dimensions"]["height"] == pytest.approx(856.84, abs=0.01)
+
+
+def test_chain_walks_through_intermediate(cut):
+    document = otio_fdl.get_document(cut)
+    chain = otio_fdl.canvas_chain(document, "offline1080")
+    assert [c["id"] for c in chain] == ["offline1080", "dsq4k", "ocfA448"]
+    assert otio_fdl.root_canvas(document, "offline1080")["id"] == "ocfA448"
+
+
+def test_unknown_pull_source_raises(cut):
+    _link_offline(cut)
+    with pytest.raises(otio_fdl.FDLError, match="unknown pull source"):
+        otio_fdl.pull_specs(cut, template_id="vxp01", source="og")
+
+
+def test_declining_source_callable_is_per_clip_error(cut):
+    _link_offline(cut)
+    (spec,) = otio_fdl.pull_specs(
+        cut, template_id="vxp01", source=lambda clip, chain: None
+    )
+    assert spec["status"] == "error"
+    assert "declined" in spec["error"]

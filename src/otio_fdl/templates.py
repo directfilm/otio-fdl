@@ -24,7 +24,14 @@ import hashlib
 import math
 import re
 
-from .core import FDLError, canvas_for, get_document, root_canvas, select_decision
+from .core import (
+    FDLError,
+    canvas_chain,
+    canvas_for,
+    get_document,
+    root_canvas,
+    select_decision,
+)
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 _ID_MAX = 32  # fdl_id; framing-decision ids allow 65 (two ids + hyphen)
@@ -257,15 +264,27 @@ def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=No
     return out
 
 
-def pull_specs(timeline, template_id=None, framing_intent_id=None, from_root=True):
+def pull_specs(timeline, template_id=None, framing_intent_id=None, source="root"):
     """Per-shot pull list for a timeline carrying an FDL document.
 
     For every clip, resolves the canvas linked to its *active* media
     reference and applies the document's canvas template (``template_id``,
-    or the sole template when omitted). With ``from_root`` (the default),
-    the template is applied to the ROOT of the canvas's derivation chain —
-    pulls come from the camera original even when the timeline references
-    offline/editorial media whose canvas is derived from it.
+    or the sole template when omitted).
+
+    ``source`` selects which canvas each pull is computed FROM — this is
+    pipeline policy, not a rule. Pulls are often made from the camera
+    original, but they may equally come from a pre-desqueezed
+    intermediate, a trimmed/common container, or any other canvas in the
+    derivation chain; and the output raster (full-res, 4K, 2K, padded
+    container) is whatever the canvas template prescribes.
+
+    * ``"root"`` (default) — the root of the linked canvas's
+      ``source_canvas_id`` chain, typically the camera original, even
+      when the timeline references offline/editorial media.
+    * ``"linked"`` — the linked canvas itself, as referenced by the cut.
+    * a callable ``source(clip, chain)`` — receives the clip and the
+      derivation chain ``[linked, ..., root]`` and returns the canvas to
+      pull from (e.g. "the first desqueezed intermediate").
 
     Returns one entry per clip: ``{"clip", "canvas_id", "pulled_from",
     "pull"}``; clips without a canvas reference yield ``{"clip",
@@ -290,6 +309,12 @@ def pull_specs(timeline, template_id=None, framing_intent_id=None, from_root=Tru
         except StopIteration:
             raise FDLError(f"no canvas template with id {template_id!r}")
 
+    if not callable(source) and source not in ("root", "linked"):
+        raise FDLError(
+            f"unknown pull source {source!r}"
+            " (use 'root', 'linked', or a callable)"
+        )
+
     specs = []
     for clip in timeline.find_clips():
         try:
@@ -297,11 +322,19 @@ def pull_specs(timeline, template_id=None, framing_intent_id=None, from_root=Tru
             if canvas is None:
                 specs.append({"clip": clip.name, "status": "unlinked"})
                 continue
-            source = (
-                root_canvas(document, canvas["id"]) if from_root else canvas
-            )
+            if callable(source):
+                chain = canvas_chain(document, canvas["id"])
+                pull_from = source(clip, chain)
+                if pull_from is None:
+                    raise FDLError(
+                        f"source callable declined clip {clip.name!r}"
+                    )
+            elif source == "root":
+                pull_from = root_canvas(document, canvas["id"])
+            else:  # "linked"
+                pull_from = canvas
             pull = apply_canvas_template(
-                source, template, framing_intent_id=framing_intent_id
+                pull_from, template, framing_intent_id=framing_intent_id
             )
         except FDLError as exc:
             specs.append({"clip": clip.name, "status": "error", "error": str(exc)})
@@ -310,7 +343,7 @@ def pull_specs(timeline, template_id=None, framing_intent_id=None, from_root=Tru
             {
                 "clip": clip.name,
                 "canvas_id": canvas["id"],
-                "pulled_from": source["id"],
+                "pulled_from": pull_from["id"],
                 "pull": pull,
             }
         )

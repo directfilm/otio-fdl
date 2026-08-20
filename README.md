@@ -45,10 +45,14 @@ otio_fdl.link(clip.media_reference, "pXLM4OnA", timeline=timeline)
 canvas = otio_fdl.canvas_for(clip.media_reference, timeline)
 decision = otio_fdl.framing_decision_for(clip.media_reference, timeline)
 
-# Per-shot VFX pull list: applies the document's canvas template to the
-# ROOT of each linked canvas's derivation chain, so pulls come from the
-# camera original even when the cut references offline/editorial proxies
-specs = otio_fdl.pull_specs(timeline)
+# Per-shot VFX pull list. Which canvas each pull is computed FROM is
+# pipeline policy, not a rule: "root" (default) walks the derivation
+# chain to the camera original even when the cut references editorial
+# proxies; "linked" uses the referenced canvas; a callable
+# source(clip, chain) can pick e.g. a pre-desqueezed intermediate. The
+# output raster (full-res, 4K, 2K, padded container) is whatever the
+# chosen canvas template prescribes.
+specs = otio_fdl.pull_specs(timeline, source="root")
 
 # Map geometry between related canvases (offline <-> OCF <-> pull):
 # two canvases sharing a framing intent define the same creative
