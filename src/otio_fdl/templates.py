@@ -10,17 +10,24 @@ it. Order of operations follows section 7.4.1 and the normative
 desqueeze-then-scale rule of sections 7.4.5/7.4.7.
 
 Where the spec delegates detail to the (unpublished) Implementation Guide,
-choices are documented inline: rounding pad/crop is distributed per the
-template's alignment gravity, and a maximum_dimensions crop is centered on
-the target box, mirroring pad_to_maximum's "target_dimensions should
-center-align to the resulting canvas".
+choices are documented inline: explicit target_dimensions are authoritative
+(7.4.4 says the free axis "may be calculated", i.e. when not supplied);
+rounding pad/crop is distributed per the template's alignment gravity; and
+a maximum_dimensions crop is centered on the target box, mirroring
+pad_to_maximum's "target_dimensions should center-align to the resulting
+canvas".
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
+import re
 
-from .core import FDLError
+from .core import FDLError, canvas_for, get_document, root_canvas, select_decision
+
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
+_ID_MAX = 32  # fdl_id; framing-decision ids allow 65 (two ids + hyphen)
 
 
 def round_dimension(value, rule=None):
@@ -28,6 +35,10 @@ def round_dimension(value, rule=None):
     rule = rule or {}
     even = rule.get("even", "even")
     mode = rule.get("mode", "up")
+    if even not in ("even", "whole"):
+        raise FDLError(f"unknown round 'even' value {even!r}")
+    if mode not in ("up", "down", "round"):
+        raise FDLError(f"unknown round 'mode' value {mode!r}")
     value = round(value, 9)  # shed float noise so exact ints survive "up"
     if even == "even":
         half = value / 2.0
@@ -41,6 +52,25 @@ def round_dimension(value, rule=None):
     if mode == "down":
         return int(math.floor(value))
     return int(math.floor(value + 0.5))
+
+
+def _valid_id(candidate, what):
+    if not _ID_PATTERN.match(candidate or "") or len(candidate) > _ID_MAX:
+        raise FDLError(
+            f"{what} {candidate!r} is not a valid FDL id"
+            f" (alphanumeric/underscore, 1-{_ID_MAX} chars)"
+        )
+    return candidate
+
+
+def _mint_canvas_id(template, canvas):
+    """A deterministic, schema-valid id for the minted canvas."""
+    composite = f"{template.get('id', 'tpl')}_{canvas.get('id', 'src')}"
+    composite = re.sub(r"[^A-Za-z0-9_]", "_", composite)
+    if len(composite) <= _ID_MAX:
+        return composite
+    digest = hashlib.md5(composite.encode()).hexdigest()[:7]
+    return f"{composite[:_ID_MAX - 8].rstrip('_')}_{digest}"
 
 
 def _region(canvas, decision, selector):
@@ -64,30 +94,15 @@ def _region(canvas, decision, selector):
     raise FDLError(f"unknown fit/preserve selector {selector!r}")
 
 
-def _select_decision(canvas, framing_intent_id):
-    decisions = canvas.get("framing_decisions", [])
-    if framing_intent_id is None:
-        if not decisions:
-            raise FDLError(f"canvas {canvas.get('id')!r} has no framing decisions")
-        return decisions[0]
-    for decision in decisions:
-        if decision.get("framing_intent_id") == framing_intent_id:
-            return decision
-    raise FDLError(
-        f"canvas {canvas.get('id')!r} has no decision for intent"
-        f" {framing_intent_id!r}"
-    )
-
-
 def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=None):
     """Mint the output canvas for ``canvas`` under ``template`` (spec 7.4).
 
     Returns a new canvas dict (canvas dimensions int, decision geometry
     float, matching the schema's types). ``framing_intent_id`` picks the
     source framing decision (first one when omitted); ``canvas_id`` names
-    the new canvas (default ``<template id>_<source id>``, id-limit 32).
+    the new canvas (default: derived from template and source ids).
     """
-    decision = _select_decision(canvas, framing_intent_id)
+    decision = select_decision(canvas, framing_intent_id)
 
     # -- 1. Normalize: desqueeze factor (widths only), then scale factor.
     source_sq = float(canvas.get("anamorphic_squeeze", 1.0))
@@ -117,19 +132,28 @@ def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=No
     def sy(h):
         return h * s
 
-    # -- 2. Scaled fit region F, positioned in target box T (7.4.7/7.4.8).
-    # For width/height fits the free axis of T tracks the fit source.
+    # -- 2. Scaled fit region F, positioned in the target box T (7.4.8).
+    # Explicit target_dimensions are authoritative for T (7.4.4); the
+    # canvas extent below still guarantees the whole fit source survives
+    # for every method except fill, whose overflow is cut off (7.4.7).
     Fw, Fh = sx(fit_dims["width"]), sy(fit_dims["height"])
-    Tw = Fw if method == "height" else float(tw)
-    Th = Fh if method == "width" else float(th)
+    Tw, Th = float(tw), float(th)
     ah = template.get("alignment_method_horizontal", "center")
     av = template.get("alignment_method_vertical", "center")
+    if ah not in ("left", "center", "right"):
+        raise FDLError(f"unknown alignment_method_horizontal {ah!r}")
+    if av not in ("top", "center", "bottom"):
+        raise FDLError(f"unknown alignment_method_vertical {av!r}")
     Tx, Ty = 0.0, 0.0
     Fx = {"left": 0.0, "center": (Tw - Fw) / 2, "right": Tw - Fw}[ah]
     Fy = {"top": 0.0, "center": (Th - Fh) / 2, "bottom": Th - Fh}[av]
 
-    # -- 3. Canvas extent: the target box, extended by preserve (7.4.9).
+    # -- 3. Canvas extent: T, plus the whole fit source (except fill),
+    # plus the preserve region (7.4.9).
     cx0, cy0, cx1, cy1 = 0.0, 0.0, Tw, Th
+    if method != "fill":
+        cx0, cy0 = min(cx0, Fx), min(cy0, Fy)
+        cx1, cy1 = max(cx1, Fx + Fw), max(cy1, Fy + Fh)
     preserve = template.get("preserve_from_source_canvas")
     if preserve:
         p_dims, p_anchor = _region(canvas, decision, preserve)
@@ -181,11 +205,17 @@ def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=No
             },
         )
 
-    new_id = canvas_id or f"{template.get('id', 'tpl')}_{canvas.get('id', 'src')}"[:32]
+    if canvas_id is not None:
+        new_id = _valid_id(canvas_id, "canvas_id")
+    else:
+        new_id = _mint_canvas_id(template, canvas)
+    intent_part = re.sub(
+        r"[^A-Za-z0-9_]", "_", decision.get("framing_intent_id") or "fd"
+    )[:_ID_MAX] or "fd"
     fd_dims, fd_anchor = place(decision["dimensions"], decision["anchor_point"])
     new_decision = {
         "label": decision.get("label", ""),
-        "id": f"{new_id}-{decision.get('framing_intent_id', '')}"[:32],
+        "id": f"{new_id}-{intent_part}",  # <=65: two ids plus hyphen
         "framing_intent_id": decision.get("framing_intent_id"),
         "dimensions": fd_dims,
         "anchor_point": fd_anchor,
@@ -227,17 +257,22 @@ def apply_canvas_template(canvas, template, framing_intent_id=None, canvas_id=No
     return out
 
 
-def pull_specs(timeline, template_id=None, framing_intent_id=None):
+def pull_specs(timeline, template_id=None, framing_intent_id=None, from_root=True):
     """Per-shot pull list for a timeline carrying an FDL document.
 
-    For every clip, resolves its linked canvas and applies the document's
-    canvas template (``template_id``, or the sole template when omitted).
-    Returns one entry per clip: ``{"clip", "canvas_id", "pull"}`` with the
-    minted output canvas, or ``{"clip", "status": "unlinked"}`` for clips
-    without a canvas reference.
-    """
-    from .core import canvas_for, get_document
+    For every clip, resolves the canvas linked to its *active* media
+    reference and applies the document's canvas template (``template_id``,
+    or the sole template when omitted). With ``from_root`` (the default),
+    the template is applied to the ROOT of the canvas's derivation chain —
+    pulls come from the camera original even when the timeline references
+    offline/editorial media whose canvas is derived from it.
 
+    Returns one entry per clip: ``{"clip", "canvas_id", "pulled_from",
+    "pull"}``; clips without a canvas reference yield ``{"clip",
+    "status": "unlinked"}`` and per-clip resolution failures (e.g. a
+    canvas id dangling after a document swap) yield ``{"clip",
+    "status": "error", "error": ...}`` without aborting the rest.
+    """
     document = get_document(timeline)
     if document is None:
         raise FDLError("timeline carries no FDL document")
@@ -257,14 +292,26 @@ def pull_specs(timeline, template_id=None, framing_intent_id=None):
 
     specs = []
     for clip in timeline.find_clips():
-        canvas = canvas_for(clip.media_reference, timeline)
-        if canvas is None:
-            specs.append({"clip": clip.name, "status": "unlinked"})
+        try:
+            canvas = canvas_for(clip.media_reference, timeline)
+            if canvas is None:
+                specs.append({"clip": clip.name, "status": "unlinked"})
+                continue
+            source = (
+                root_canvas(document, canvas["id"]) if from_root else canvas
+            )
+            pull = apply_canvas_template(
+                source, template, framing_intent_id=framing_intent_id
+            )
+        except FDLError as exc:
+            specs.append({"clip": clip.name, "status": "error", "error": str(exc)})
             continue
-        pull = apply_canvas_template(
-            canvas, template, framing_intent_id=framing_intent_id
-        )
         specs.append(
-            {"clip": clip.name, "canvas_id": canvas["id"], "pull": pull}
+            {
+                "clip": clip.name,
+                "canvas_id": canvas["id"],
+                "pulled_from": source["id"],
+                "pull": pull,
+            }
         )
     return specs

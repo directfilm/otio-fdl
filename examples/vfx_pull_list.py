@@ -38,6 +38,7 @@ def build_demo_timeline(document):
                 otio.opentime.RationalTime(48, 24),
             ),
         )
+        otio_fdl.link(clip.media_reference, canvas["id"])
         track.append(clip)
     return timeline
 
@@ -50,9 +51,6 @@ def main():
 
     timeline = build_demo_timeline(document)
     otio_fdl.attach_document(timeline, document)
-    for clip in timeline.find_clips():
-        canvas_id = clip.name.rsplit("_", 1)[-1]
-        otio_fdl.link(clip.media_reference, canvas_id, timeline=timeline)
 
     print(f"Pull list for {timeline.name!r}  (FDL {document['uuid']})")
     for spec in otio_fdl.pull_specs(timeline, template_id=template_id):

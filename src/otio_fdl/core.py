@@ -15,9 +15,11 @@ Model ("carrier, not translator"):
 
 from __future__ import annotations
 
-import copy
+import functools
 import json
 import os
+import posixpath
+import urllib.parse
 from importlib import resources
 
 NAMESPACE = "ascfdl"
@@ -43,6 +45,12 @@ def load_fdl(path):
     return document
 
 
+@functools.lru_cache(maxsize=None)
+def _schema(filename):
+    text = resources.files(__package__).joinpath("schemas", filename).read_text()
+    return json.loads(text)
+
+
 def validate_fdl(document):
     """Validate ``document`` against the bundled official ASC FDL schema.
 
@@ -50,23 +58,26 @@ def validate_fdl(document):
     (patch releases share their minor version's schema). Requires the
     ``jsonschema`` package; raises :class:`FDLError` on failure.
     """
-    version = document.get("version") or {}
+    # plain-convert first: documents read back from OTIO metadata are
+    # AnyDictionary/AnyVector, which neither dict checks nor jsonschema
+    # accept as JSON objects/arrays
+    document = _as_plain(document)
+    version = document.get("version")
+    if not isinstance(version, dict):
+        version = {}
     key = (version.get("major"), version.get("minor"))
     schema_file = _SCHEMA_FILES.get(key)
     if schema_file is None:
         supported = ", ".join(f"{m}.{n}" for m, n in sorted(_SCHEMA_FILES))
         raise FDLError(
-            f"unsupported or missing FDL version {version!r}"
+            f"unsupported or missing FDL version {document.get('version')!r}"
             f" (supported: {supported})"
         )
 
     import jsonschema
 
-    schema_text = (
-        resources.files(__package__).joinpath("schemas", schema_file).read_text()
-    )
     try:
-        jsonschema.validate(document, json.loads(schema_text))
+        jsonschema.validate(document, _schema(schema_file))
     except jsonschema.ValidationError as exc:
         raise FDLError(
             f"FDL document failed schema validation: {exc.message}"
@@ -77,9 +88,9 @@ def validate_fdl(document):
 def attach_document(timeline, document, *, validate=True, replace=False):
     """Attach an FDL document to ``timeline.metadata["ascfdl"]["document"]``.
 
-    The document is deep-copied in, so later mutation of the source dict
-    cannot corrupt the timeline. Set ``replace=True`` to overwrite an
-    existing document.
+    The document is deep-copied in (via plain-JSON conversion), so later
+    mutation of the source cannot corrupt the timeline. Set ``replace=True``
+    to overwrite an existing document.
     """
     if validate:
         validate_fdl(document)
@@ -89,7 +100,7 @@ def attach_document(timeline, document, *, validate=True, replace=False):
             "timeline already carries an FDL document"
             " (pass replace=True to overwrite)"
         )
-    ns["document"] = copy.deepcopy(document)
+    ns["document"] = _as_plain(document)
 
 
 def get_document(timeline):
@@ -125,6 +136,61 @@ def iter_canvases(document):
             yield context, canvas
 
 
+def canvas_by_id(document, canvas_id):
+    """Return the canvas with ``canvas_id``, or raise :class:`FDLError`."""
+    for _, canvas in iter_canvases(document):
+        if canvas.get("id") == canvas_id:
+            return canvas
+    raise FDLError(f"canvas id {canvas_id!r} not present in document")
+
+
+def canvas_chain(document, canvas_id):
+    """The derivation chain ``[canvas, parent, ..., root]``.
+
+    Follows ``source_canvas_id`` until it reaches a root (a canvas whose
+    source is itself or unset). Cycle-safe; a dangling source id raises.
+    """
+    chain = []
+    seen = set()
+    current = canvas_by_id(document, canvas_id)
+    while True:
+        cid = current.get("id")
+        if cid in seen:
+            raise FDLError(f"source_canvas_id cycle at canvas {cid!r}")
+        seen.add(cid)
+        chain.append(current)
+        source_id = current.get("source_canvas_id")
+        if source_id in (None, cid):
+            return chain
+        current = canvas_by_id(document, source_id)
+
+
+def root_canvas(document, canvas_id):
+    """The original (root) canvas that ``canvas_id`` derives from."""
+    return canvas_chain(document, canvas_id)[-1]
+
+
+def select_decision(canvas, framing_intent_id=None, default_intent=None):
+    """The canvas's framing decision for an intent.
+
+    With no ``framing_intent_id``, falls back to ``default_intent`` (a
+    document's ``default_framing_intent``); with neither, the canvas's
+    first decision. Raises :class:`FDLError` when nothing matches.
+    """
+    decisions = canvas.get("framing_decisions", [])
+    intent = framing_intent_id or default_intent
+    if intent is None:
+        if not decisions:
+            raise FDLError(f"canvas {canvas.get('id')!r} has no framing decisions")
+        return decisions[0]
+    for decision in decisions:
+        if decision.get("framing_intent_id") == intent:
+            return decision
+    raise FDLError(
+        f"canvas {canvas.get('id')!r} has no decision for intent {intent!r}"
+    )
+
+
 def link(media_reference, canvas_id, *, timeline=None):
     """Point ``media_reference`` at a canvas by id.
 
@@ -135,75 +201,105 @@ def link(media_reference, canvas_id, *, timeline=None):
         document = get_document(timeline)
         if document is None:
             raise FDLError("timeline carries no FDL document")
-        if not any(c["id"] == canvas_id for _, c in iter_canvases(document)):
-            raise FDLError(f"canvas id {canvas_id!r} not present in document")
+        canvas_by_id(document, canvas_id)
     media_reference.metadata.setdefault(NAMESPACE, {})["canvas_id"] = canvas_id
 
 
-def auto_link(timeline):
+def _media_references(clip):
+    """``{key: media_reference}`` for a clip (multi-reference aware)."""
+    try:
+        return dict(clip.media_references())
+    except AttributeError:  # pragma: no cover - OTIO without multi-reference
+        mr = clip.media_reference
+        return {"DEFAULT_MEDIA": mr} if mr else {}
+
+
+def _reference_matches_file(media_reference, filename):
+    """Does an FDL ``clip_id.file`` entry name this media reference?
+
+    ExternalReference: compare against the decoded basename of target_url.
+    ImageSequenceReference: a sequence has no single file, so match when
+    ``filename`` fits the sequence pattern (prefix/suffix) or equals the
+    decoded basename of the sequence directory.
+    """
+    prefix = getattr(media_reference, "name_prefix", None)
+    suffix = getattr(media_reference, "name_suffix", None)
+    if prefix is not None or suffix is not None:  # image sequence
+        if filename.startswith(prefix or "") and filename.endswith(suffix or ""):
+            if len(filename) > len(prefix or "") + len(suffix or ""):
+                return True
+    for url in (
+        getattr(media_reference, "target_url", None),
+        getattr(media_reference, "target_url_base", None),
+    ):
+        if not url:
+            continue
+        path = urllib.parse.unquote(urllib.parse.urlparse(url).path or url)
+        base = posixpath.basename(path.replace("\\", "/").rstrip("/"))
+        if base and base == filename:
+            return True
+        # tolerate plain filesystem paths in target_url
+        if os.path.basename(path.rstrip("/\\")) == filename:
+            return True
+    return False
+
+
+def auto_link(timeline, choose=None):
     """Link media references using the document's per-context ``clip_id``.
 
-    FDL 2.0 contexts may carry ``clip_id`` records (``clip_name``, ``file``).
-    For every clip in the timeline, a context matches when its
-    ``clip_id.clip_name`` equals the clip's name, or its ``clip_id.file``
-    equals the basename of a media reference's ``target_url``. When the
-    matching context holds exactly one canvas, every media reference of that
-    clip is linked to it (file matches link just the matching reference).
+    FDL 2.0 contexts may carry ``clip_id`` records (``clip_name``,
+    ``file``). Every media reference of every clip is resolved
+    independently: a context matches a reference when its ``clip_id.file``
+    names that reference's media, or (clip-wide) when ``clip_id.clip_name``
+    equals the clip's name. A single candidate canvas links the reference;
+    several candidates are reported as ambiguous unless ``choose`` — called
+    as ``choose(media_reference, candidate_canvases)`` and returning a
+    canvas or ``None`` — settles it. Nothing is ever guessed.
 
-    Returns a report dict: ``{"linked": [...], "ambiguous": [...],
-    "unmatched": [...]}`` naming clips by name.
+    Returns ``{"linked": {clip: {ref_key: canvas_id}},
+    "ambiguous": {clip: {ref_key: [candidate ids]}}, "unmatched": [clip]}``.
     """
     document = get_document(timeline)
     if document is None:
         raise FDLError("timeline carries no FDL document")
 
     by_clip_name = {}
-    by_file = {}
+    with_file = []
     for context in document.get("contexts", []):
         clip_id = context.get("clip_id") or {}
         if clip_id.get("clip_name"):
             by_clip_name.setdefault(clip_id["clip_name"], []).append(context)
         if clip_id.get("file"):
-            by_file.setdefault(clip_id["file"], []).append(context)
+            with_file.append((clip_id["file"], context))
 
-    report = {"linked": [], "ambiguous": [], "unmatched": []}
+    report = {"linked": {}, "ambiguous": {}, "unmatched": []}
     for clip in timeline.find_clips():
-        contexts = list(by_clip_name.get(clip.name, []))
-        file_hits = []  # (media_reference, context)
-        for mr in _media_references(clip):
-            url = getattr(mr, "target_url", None) or getattr(
-                mr, "target_url_base", None
-            )
-            if url:
-                for context in by_file.get(os.path.basename(url.rstrip("/")), []):
-                    file_hits.append((mr, context))
-
-        if not contexts and not file_hits:
+        name_contexts = by_clip_name.get(clip.name, [])
+        matched_any = False
+        for key, mr in _media_references(clip).items():
+            file_contexts = [
+                ctx for fname, ctx in with_file
+                if _reference_matches_file(mr, fname)
+            ]
+            contexts = file_contexts or name_contexts
+            if not contexts:
+                continue
+            matched_any = True
+            candidates = [c for ctx in contexts for c in ctx.get("canvases", [])]
+            if len(candidates) > 1 and choose is not None:
+                picked = choose(mr, candidates)
+                if picked is not None:
+                    candidates = [picked]
+            if len(candidates) == 1:
+                link(mr, candidates[0]["id"])
+                report["linked"].setdefault(clip.name, {})[key] = candidates[0]["id"]
+            elif candidates:
+                report["ambiguous"].setdefault(clip.name, {})[key] = [
+                    c["id"] for c in candidates
+                ]
+        if not matched_any:
             report["unmatched"].append(clip.name)
-            continue
-
-        linked = False
-        for mr, context in file_hits:
-            canvases = context.get("canvases", [])
-            if len(canvases) == 1:
-                link(mr, canvases[0]["id"])
-                linked = True
-        if contexts and not linked:
-            canvases = [c for ctx in contexts for c in ctx.get("canvases", [])]
-            if len(canvases) == 1:
-                for mr in _media_references(clip):
-                    link(mr, canvases[0]["id"])
-                linked = True
-        report["linked" if linked else "ambiguous"].append(clip.name)
     return report
-
-
-def _media_references(clip):
-    """All media references of a clip (multi-reference aware)."""
-    try:
-        return list(clip.media_references().values())
-    except AttributeError:  # pragma: no cover - OTIO < 0.15
-        return [clip.media_reference] if clip.media_reference else []
 
 
 def canvas_for(media_reference, timeline):
@@ -215,26 +311,25 @@ def canvas_for(media_reference, timeline):
     document = get_document(timeline)
     if document is None:
         raise FDLError("timeline carries no FDL document")
-    for _, canvas in iter_canvases(document):
-        if canvas["id"] == canvas_id:
-            return canvas
-    raise FDLError(f"canvas id {canvas_id!r} not present in document")
+    return canvas_by_id(document, canvas_id)
 
 
 def framing_decision_for(media_reference, timeline, framing_intent_id=None):
     """Resolve the framing decision for a media reference.
 
     Uses ``framing_intent_id`` when given, otherwise the document's
-    ``default_framing_intent``. Returns ``None`` when the media reference is
-    unlinked or the canvas holds no decision for that intent.
+    ``default_framing_intent``. Returns ``None`` when the media reference
+    is unlinked or the canvas holds no decision for that intent.
     """
     canvas = canvas_for(media_reference, timeline)
     if canvas is None:
         return None
-    if framing_intent_id is None:
-        document = get_document(timeline)
-        framing_intent_id = document.get("default_framing_intent")
-    for decision in canvas.get("framing_decisions", []):
-        if decision.get("framing_intent_id") == framing_intent_id:
-            return decision
-    return None
+    document = get_document(timeline)
+    try:
+        return select_decision(
+            canvas,
+            framing_intent_id,
+            default_intent=document.get("default_framing_intent"),
+        )
+    except FDLError:
+        return None

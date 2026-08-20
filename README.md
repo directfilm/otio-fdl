@@ -45,6 +45,17 @@ otio_fdl.link(clip.media_reference, "pXLM4OnA", timeline=timeline)
 canvas = otio_fdl.canvas_for(clip.media_reference, timeline)
 decision = otio_fdl.framing_decision_for(clip.media_reference, timeline)
 
+# Per-shot VFX pull list: applies the document's canvas template to the
+# ROOT of each linked canvas's derivation chain, so pulls come from the
+# camera original even when the cut references offline/editorial proxies
+specs = otio_fdl.pull_specs(timeline)
+
+# Map geometry between related canvases (offline <-> OCF <-> pull):
+# two canvases sharing a framing intent define the same creative
+# rectangle in two pixel spaces, which yields the affine map between them
+t = otio_fdl.transform_between(document, "offline1080", "ocfA448")
+dims, anchor = otio_fdl.map_rect(t, note_dims, note_anchor)
+
 # The document round-trips back out as a sidecar
 restored = otio_fdl.extract_document(timeline)
 

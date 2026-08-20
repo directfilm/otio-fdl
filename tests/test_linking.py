@@ -5,9 +5,12 @@
 
 import copy
 
+import opentimelineio as otio
 import pytest
 
 import otio_fdl
+
+KEY = otio.schema.Clip.DEFAULT_MEDIA_KEY
 
 
 A65_CANVAS = "pXLM4OnA"
@@ -73,9 +76,9 @@ def test_auto_link_by_clip_name(simple_timeline, a65_document):
 
     report = otio_fdl.auto_link(simple_timeline)
 
-    assert report["linked"] == ["shot010"]
+    assert report["linked"] == {"shot010": {KEY: A65_CANVAS}}
     assert report["unmatched"] == ["shot020"]
-    assert report["ambiguous"] == []
+    assert report["ambiguous"] == {}
 
     shot010 = [c for c in simple_timeline.find_clips() if c.name == "shot010"][0]
     canvas = otio_fdl.canvas_for(shot010.media_reference, simple_timeline)
@@ -94,7 +97,7 @@ def test_auto_link_by_file(simple_timeline, a65_document):
 
     report = otio_fdl.auto_link(simple_timeline)
 
-    assert report["linked"] == ["shot020"]
+    assert report["linked"] == {"shot020": {KEY: A65_CANVAS}}
     assert "shot010" in report["unmatched"]
 
 
@@ -109,7 +112,7 @@ def test_auto_link_ambiguous_multi_canvas(simple_timeline, a65_document):
 
     report = otio_fdl.auto_link(simple_timeline)
 
-    assert report["ambiguous"] == ["shot010"]
+    assert report["ambiguous"] == {"shot010": {KEY: ["pXLM4OnA", "second01"]}}
     shot010 = [c for c in simple_timeline.find_clips() if c.name == "shot010"][0]
     assert otio_fdl.canvas_for(shot010.media_reference, simple_timeline) is None
 
