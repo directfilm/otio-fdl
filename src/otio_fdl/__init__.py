@@ -8,6 +8,11 @@ the complete FDL document travels once at timeline scope under the
 ``ascfdl`` namespace; media references point into it by canvas id.
 """
 
+from .templates import (  # noqa: F401
+    apply_canvas_template,
+    pull_specs,
+    round_dimension,
+)
 from .core import (  # noqa: F401
     NAMESPACE,
     FDLError,
@@ -25,6 +30,9 @@ from .core import (  # noqa: F401
 
 __all__ = [
     "NAMESPACE",
+    "apply_canvas_template",
+    "pull_specs",
+    "round_dimension",
     "FDLError",
     "attach_document",
     "auto_link",
