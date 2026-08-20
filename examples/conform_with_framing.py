@@ -79,7 +79,7 @@ def lab_fdl():
     return {
         "uuid": "83b2b6f2-42e2-4e4b-9a67-1c1de6f4a301",
         "version": {"major": 2, "minor": 0},
-        "fdl_creator": "otio-fdl conform demo",
+        "fdl_creator": "Origami",
         "default_framing_intent": INTENT,
         "framing_intents": [
             {
