@@ -100,3 +100,26 @@ def test_plain_metadata_survives_stock_otio(simple_timeline, a65_document, tmp_p
     reloaded = otio.adapters.read_from_file(str(otio_path))
     raw = reloaded.metadata["ascfdl"]["document"]
     assert raw["uuid"] == a65_document["uuid"]
+
+
+def test_unknown_future_fields_survive_carriage(simple_timeline, tmp_path):
+    """The inheritance guarantee: fields this library has never heard of —
+    a future FDL 2.1 rotation, underscore vendor properties — must survive
+    attach -> .otio file -> extract verbatim. The carrier interprets
+    nothing, so FDL evolution is inherited, not re-implemented."""
+    document = otio_fdl.load_fdl(ALL_VALID_FIXTURES[0])
+    canvas = document["contexts"][0]["canvases"][0]
+    canvas["rotation"] = {"angle": 90}            # hypothetical 2.1 field
+    canvas["_studio_note"] = "flopped for continuity"  # vendor property
+    document["_pipeline"] = {"show": "EP101", "lut": "sh010_v2"}
+
+    otio_fdl.attach_document(simple_timeline, document, validate=False)
+    otio_path = tmp_path / "cut.otio"
+    otio.adapters.write_to_file(simple_timeline, str(otio_path))
+    reloaded = otio.adapters.read_from_file(str(otio_path))
+
+    extracted = otio_fdl.extract_document(reloaded)
+    out_canvas = extracted["contexts"][0]["canvases"][0]
+    assert out_canvas["rotation"] == {"angle": 90}
+    assert out_canvas["_studio_note"] == "flopped for continuity"
+    assert extracted["_pipeline"] == {"show": "EP101", "lut": "sh010_v2"}
