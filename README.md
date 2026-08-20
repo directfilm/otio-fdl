@@ -68,6 +68,13 @@ otio.adapters.write_to_file(timeline, "cut_with_framing.otio")
 
 ## Limitations (deliberate, documented)
 
+Framing semantics are the ASC's domain, not this library's: spec gaps
+are fixed upstream and inherited here — verbatim carriage already
+preserves unknown fields (a future FDL 2.1 rotation, underscore vendor
+properties) through OTIO round-trips, and adopting a new spec version
+means adding its official schema, not changing the model. This library
+never invents framing fields of its own.
+
 - **No rotation or flip/flop.** FDL has no orientation field — every region
   is an axis-aligned rect ([ascmitc/fdl#28](https://github.com/ascmitc/fdl/issues/28),
   slated for FDL 2.1). Transforms here are translation + per-axis scale;

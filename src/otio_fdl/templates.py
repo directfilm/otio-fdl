@@ -9,6 +9,12 @@ new output canvas — the actual pull raster and where the framing lands in
 it. Order of operations follows section 7.4.1 and the normative
 desqueeze-then-scale rule of sections 7.4.5/7.4.7.
 
+This module implements FDL-DOMAIN semantics (the ASC's spec, not carrier
+logic) and exists only until the official asc-fdl implementation is
+usable in this environment; it is version-pinned to the spec, validated
+against the spec's own numeric examples, and adds no semantics of its
+own.
+
 Where the spec delegates detail to the (unpublished) Implementation Guide,
 choices are documented inline: explicit target_dimensions are authoritative
 (7.4.4 says the free axis "may be calculated", i.e. when not supplied);

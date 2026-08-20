@@ -10,6 +10,12 @@ those rectangles (in desqueezed display space, per the spec's
 desqueeze-then-scale rule) yields the affine map between the canvases —
 offline proxy to OCF, OCF to VFX pull, pull to conform raster.
 
+This module derives maps from FDL-domain data without extending it:
+translation + per-axis scale is exactly what FDL 2.0.x can express —
+orientation (rotation/flip) has no FDL field yet (ascmitc/fdl#28, slated
+2.1) and will be honored here when the spec can say it, not invented
+before.
+
 A transform is a plain dict ``{"scale_x", "scale_y", "offset_x",
 "offset_y", "uniform"}`` mapping source-canvas pixels to target-canvas
 pixels: ``x' = x * scale_x + offset_x`` (and likewise y). ``uniform`` is
