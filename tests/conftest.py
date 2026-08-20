@@ -34,6 +34,7 @@ def assert_fdl_equal(a, b, path="$"):
     else:
         assert a == b, f"{path}: {a!r} != {b!r}"
 
+
 A65 = FIXTURES / "A65_effective-area_wdesqueeze.fdl"
 SCEN3 = FIXTURES / "Scen3__RESULT.fdl"
 CORRUPT = FIXTURES / "corrupt_fdl.fdl"
